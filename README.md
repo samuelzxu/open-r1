@@ -157,7 +157,15 @@ To train via the GRPO trainer, we use one GPU to run vLLM for faster generation 
 ```shell
 ACCELERATE_LOG_LEVEL=info accelerate launch --config_file recipes/accelerate_configs/zero2.yaml \
     --num_processes=7 src/open_r1/grpo.py \
-    --config recipes/DeepSeek-R1-Distill-Qwen-1.5B/grpo/config_demo.yaml
+    --config DeepSeek-R1-Distill-Qwen-14B/grpo_run1-test.yaml --wandb_entity huggingface --wandb_project aimo 
+    
+ACCELERATE_LOG_LEVEL=info accelerate launch --config_file recipes/accelerate_configs/zero2.yaml \
+    --num_processes=7 src/open_r1/grpo.py \
+    --config DeepSeek-R1-Distill-Qwen-14B/grpo_run2-test.yaml --wandb_entity huggingface --wandb_project aimo
+    
+ACCELERATE_LOG_LEVEL=info accelerate launch --config_file recipes/accelerate_configs/zero2.yaml \
+    --num_processes=7 src/open_r1/grpo.py \
+    --config DeepSeek-R1-Distill-Qwen-14B/grpo_run3-test.yaml --wandb_entity huggingface --wandb_project aimo 
 ```
 
 > [!WARNING]
