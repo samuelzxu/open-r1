@@ -1,4 +1,3 @@
-git clone https://github.com/huggingface/open-r1/ && cd open-r1/
 pip install uv
 uv venv openr1 --python 3.11 && source openr1/bin/activate && uv pip install --upgrade pip --link-mode=copy
 uv pip install vllm==0.7.1 --link-mode=copy
