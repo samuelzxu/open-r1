@@ -150,15 +150,18 @@ def get_len_reward(tokenizer: AutoTokenizer = None, **kwargs) -> float:
 
         # If all responses have the same length, return zero rewards
         if max_len == min_len:
+            print("Max len = min len: ",[0.0] * len(completions))
             return [0.0] * len(completions)
 
         rewards = []
         if len(all_correct) == 0:
+            print("No correct completions")
             rewards = [0.0] * len(completions)
         else:
             min_len_correct = min(all_correct)
             max_len_correct = max(all_correct)
             if max_len_correct == min_len_correct:
+                print("Max len correct = min len correct")
                 rewards = [0.0] * len(completions)
             else:
                 for i, (length, correct) in enumerate(zip(lengths, correctness)):
@@ -166,6 +169,7 @@ def get_len_reward(tokenizer: AutoTokenizer = None, **kwargs) -> float:
                         rewards.append(1.0 - 0.5*(length - min_len) / (max_len - min_len))
                     else:
                         rewards.append(0)
+                print("Rewards: ",rewards)
         return rewards
     return len_reward
 
