@@ -31,7 +31,7 @@ def extract_boxed_text(text):
 def parse_answer(content: str) -> int | None:
     """Parse the last boxed answer from the content."""
     answer = extract_boxed_text(content)
-    if answer.isdigit():
+    if answer is not None and answer.isdigit():
         return int(answer)
     else:
         return None
@@ -47,8 +47,6 @@ def accuracy_reward(completions, solution, **kwargs):
             reward = 0.0
             if gold_answer is None:
                 print(f"Failed to parse gold answer: {gold_answer}")
-            if answer is None:
-                print(f"Failed to parse answer: {content[-50:]}")
         elif answer == gold_answer:
             reward = 1.0
         else:
@@ -165,7 +163,7 @@ def get_len_reward(tokenizer: AutoTokenizer = None, **kwargs) -> float:
             else:
                 for i, (length, correct) in enumerate(zip(lengths, correctness)):
                     if correct:
-                        rewards.append(1.0 - 0.5*(length - min_len_correct) / (max_len_correct - min_len_correct))
+                        rewards.append(1.0 - 0.5*(length - min_len) / (max_len - min_len))
                     else:
                         rewards.append(0)
         return rewards
