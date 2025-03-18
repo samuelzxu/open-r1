@@ -788,10 +788,6 @@ class GRPOTrainer(Trainer):
         rewards_per_func = torch.zeros(len(prompts), len(self.reward_funcs), device=device)
         rewards_per_func = gather(rewards_per_func)
 
-        print(f"Completions gathered len: {[len(completion_gathered) for completion_gathered in completions_gathered]}")
-        with open("test.txt", 'w') as f:
-            f.write(str(completions_gathered))
-
         for i, (reward_func, reward_processing_class) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes)
         ):
@@ -822,7 +818,7 @@ class GRPOTrainer(Trainer):
         # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
         # completions may be distributed across processes
         
-        print(f"Gathered rewards across all funcs: {rewards_per_func}")
+        print(f"Gathered rewards across all funcs:\n {rewards_per_func}")
 
         # Apply weights to each reward function's output and sum
         rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).sum(dim=1)
@@ -866,13 +862,13 @@ class GRPOTrainer(Trainer):
             rewards_to_log = rewards.tolist()
 
             if self.accelerator.is_main_process:
-                if is_rich_available():
-                    print_prompt_completions_sample(
-                        prompts_to_log,
-                        completions_to_log,
-                        rewards_to_log,
-                        self.state.global_step,
-                    )
+                # if is_rich_available():
+                #     print_prompt_completions_sample(
+                #         prompts_to_log,
+                #         completions_to_log,
+                #         rewards_to_log,
+                #         self.state.global_step,
+                #     )
                 if self.args.report_to and "wandb" in self.args.report_to and wandb.run is not None:
                     import pandas as pd
 
