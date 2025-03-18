@@ -18,24 +18,23 @@ if is_e2b_available():
 
     load_dotenv()
 
+def extract_boxed_text(text):
+    pattern = r'oxed{(.*?)}'
+    matches = re.findall(pattern, text)
+    if not matches:
+        return ""
+    for match in matches[::-1]:
+        if match != "":
+            return match
+    return None
+
 def parse_answer(content: str) -> int | None:
     """Parse the last boxed answer from the content."""
-    pattern = r"\\boxed\{(.*?)\}"
-    matches = re.findall(pattern, content)
-    if len(matches) == 0:
-        return None
-    answer = matches[-1]
+    answer = extract_boxed_text(content)
     if answer.isdigit():
         return int(answer)
     else:
-        while len(matches) > 0:
-            answer = matches[-1]
-            if answer.isdigit():
-                return int(answer)
-            else:
-                matches = matches[:-1]
         return None
-
 
 def accuracy_reward(completions, solution, **kwargs):
     """Reward function that checks if the completion is the same as the ground truth."""
@@ -43,28 +42,21 @@ def accuracy_reward(completions, solution, **kwargs):
     rewards = []
     for content, sol in zip(contents, solution):
         gold_answer = parse_answer(sol)
-        if gold_answer is None:
-            # Skip unparseable examples
-            rewards.append(0.0)
-            print("Failed to parse gold solution: ", sol)
-            continue
-
-        # Extract the last boxed answer
         answer = parse_answer(content)
-        if answer is None :
+        if gold_answer is None or answer is None:
             reward = 0.0
+            if gold_answer is None:
+                print(f"Failed to parse gold answer: {gold_answer}")
+            if answer is None:
+                print(f"Failed to parse answer: {content[-50:]}")
+        elif answer == gold_answer:
+            reward = 1.0
         else:
-            # If the gold solution is not parseable, we reward 1 to skip this example
-            reward = 1.0
-            print("Failed to parse gold solution: ", sol)
-        
-        if answer == gold_answer:
-            reward = 1.0
+            reward = 0.0
 
         rewards.append(reward)
 
     return rewards
-
 
 def format_reward(completions, **kwargs):
     """Reward function that checks if the reasoning process is enclosed within <think> and </think> tags, while the final answer is enclosed within <answer> and </answer> tags."""

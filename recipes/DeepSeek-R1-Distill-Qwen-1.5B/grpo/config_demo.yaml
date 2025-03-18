@@ -37,7 +37,7 @@ lr_scheduler_kwargs:
 max_prompt_length: 512
 max_completion_length: 8196
 max_steps: -1
-num_generations: 16
+num_generations: 4
 num_train_epochs: 2
 output_dir: data/DeepSeek-R1-Distill-Qwen-1.5B-GRPO
 overwrite_output_dir: true
