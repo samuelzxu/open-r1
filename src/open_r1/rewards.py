@@ -6,6 +6,7 @@ import re
 from typing import Dict
 
 from latex2sympy2_extended import NormalizationConfig
+from transformers import AutoTokenizer
 from math_verify import LatexExtractionConfig, parse, verify
 
 from .utils import is_e2b_available
@@ -17,48 +18,49 @@ if is_e2b_available():
 
     load_dotenv()
 
+def parse_answer(content: str) -> int | None:
+    """Parse the last boxed answer from the content."""
+    pattern = r"\\boxed\{(.*?)\}"
+    matches = re.findall(pattern, content)
+    if len(matches) == 0:
+        return None
+    answer = matches[-1]
+    if answer.isdigit():
+        return int(answer)
+    else:
+        while len(matches) > 0:
+            answer = matches[-1]
+            if answer.isdigit():
+                return int(answer)
+            else:
+                matches = matches[:-1]
+        return None
+
 
 def accuracy_reward(completions, solution, **kwargs):
     """Reward function that checks if the completion is the same as the ground truth."""
     contents = [completion[0]["content"] for completion in completions]
     rewards = []
     for content, sol in zip(contents, solution):
-        gold_parsed = parse(
-            sol,
-            extraction_mode="first_match",
-            extraction_config=[LatexExtractionConfig()],
-        )
-        if len(gold_parsed) != 0:
-            # We require the answer to be provided in correct latex (no malformed operators)
-            answer_parsed = parse(
-                content,
-                extraction_config=[
-                    LatexExtractionConfig(
-                        normalization_config=NormalizationConfig(
-                            nits=False,
-                            malformed_operators=False,
-                            basic_latex=True,
-                            equations=True,
-                            boxed="all",
-                            units=True,
-                        ),
-                        # Ensures that boxed is tried first
-                        boxed_match_priority=0,
-                        try_extract_without_anchor=False,
-                    )
-                ],
-                extraction_mode="first_match",
-            )
-            # Reward 1 if the content is the same as the ground truth, 0 otherwise
-            try:
-                reward = float(verify(answer_parsed, gold_parsed))
-            except Exception as e:
-                print(f"verify failed: {e}, answer: {answer_parsed}, gold: {gold_parsed}")
-                reward = 0.0
+        gold_answer = parse_answer(sol)
+        if gold_answer is None:
+            # Skip unparseable examples
+            rewards.append(0.0)
+            print("Failed to parse gold solution: ", sol)
+            continue
+
+        # Extract the last boxed answer
+        answer = parse_answer(content)
+        if answer is None :
+            reward = 0.0
         else:
             # If the gold solution is not parseable, we reward 1 to skip this example
             reward = 1.0
             print("Failed to parse gold solution: ", sol)
+        
+        if answer == gold_answer:
+            reward = 1.0
+
         rewards.append(reward)
 
     return rewards
@@ -66,7 +68,7 @@ def accuracy_reward(completions, solution, **kwargs):
 
 def format_reward(completions, **kwargs):
     """Reward function that checks if the reasoning process is enclosed within <think> and </think> tags, while the final answer is enclosed within <answer> and </answer> tags."""
-    pattern = r"^<think>\n.*?\n</think>\n<answer>\n.*?\n</answer>$"
+    pattern = r"^<think>\n.*?\n</think>\n.*?\\boxed{\d+}.*?$"
     completion_contents = [completion[0]["content"] for completion in completions]
     matches = [re.match(pattern, content, re.DOTALL | re.MULTILINE) for content in completion_contents]
     return [1.0 if match else 0.0 for match in matches]
@@ -111,7 +113,7 @@ def reasoning_steps_reward(completions, **kwargs):
     return [min(1.0, count / 3) for count in matches]
 
 
-def len_reward(completions: list[Dict[str, str]], solution: list[str], **kwargs) -> float:
+def get_len_reward(completions: list[Dict[str, str]], solution: list[str], max_ctx: int = 4096, tokenizer: AutoTokenizer = None, **kwargs) -> float:
     """Compute length-based rewards to discourage overthinking and promote token efficiency.
 
     Taken from from the Kimi 1.5 tech report: https://arxiv.org/abs/2501.12599
@@ -122,67 +124,60 @@ def len_reward(completions: list[Dict[str, str]], solution: list[str], **kwargs)
 
     Returns:
         List of rewards where:
-        - For correct answers: reward = 0.5 - (len - min_len)/(max_len - min_len)
-        - For incorrect answers: reward = min(0, 0.5 - (len - min_len)/(max_len - min_len))
+        - If there exists a correct answer:
+            - For correct answers: reward = 1 - (len - min_len_correct)/(max_len_correct - min_len_correct)
+            - For incorrect answers: reward = min(0, 1 - (len - min_len_correct)/(max_len_correct - min_len_correct))
+        - If there does not exist a correct answer:
+            - For all answers: reward = -0.5 if len >= max_ctx, 0 otherwise
     """
-    contents = [completion[0]["content"] for completion in completions]
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-14B")
 
-    # First check correctness of answers
-    correctness = []
-    for content, sol in zip(contents, solution):
-        gold_parsed = parse(
-            sol,
-            extraction_mode="first_match",
-            extraction_config=[LatexExtractionConfig()],
-        )
-        if len(gold_parsed) == 0:
-            # Skip unparseable examples
-            correctness.append(True)  # Treat as correct to avoid penalizing
-            print("Failed to parse gold solution: ", sol)
-            continue
+    def len_reward(completions, solution, **kwargs):
+        contents = [completion[0]["content"] for completion in completions]
+        # First check correctness of answers
+        correctness = []
+        for content, sol in zip(contents, solution):
+            gold_answer = parse_answer(sol)
+            if gold_answer is None:
+                # Skip unparseable examples
+                correctness.append(True)  # Treat as correct to avoid penalizing
+                print("Failed to parse gold solution: ", sol)
+                continue
 
-        answer_parsed = parse(
-            content,
-            extraction_config=[
-                LatexExtractionConfig(
-                    normalization_config=NormalizationConfig(
-                        nits=False,
-                        malformed_operators=False,
-                        basic_latex=True,
-                        equations=True,
-                        boxed=True,
-                        units=True,
-                    ),
-                    boxed_match_priority=0,
-                    try_extract_without_anchor=False,
-                )
-            ],
-            extraction_mode="first_match",
-        )
-        correctness.append(verify(answer_parsed, gold_parsed))
+            # Extract the last boxed answer
+            answer = parse_answer(content)
+            if answer is None:
+                correctness.append(False)
+            else:
+                correctness.append(answer == gold_answer)
 
-    # Calculate lengths
-    lengths = [len(content) for content in contents]
-    min_len = min(lengths)
-    max_len = max(lengths)
+        # Calculate lengths
+        lengths = [len(tokenizer.tokenize(content)) for content in contents]
+        min_len = min(lengths)
+        max_len = max(lengths)
+        all_correct = [lengths[i] for i, correct in enumerate(correctness) if correct]
 
-    # If all responses have the same length, return zero rewards
-    if max_len == min_len:
-        return [0.0] * len(completions)
+        # If all responses have the same length, return zero rewards
+        if max_len == min_len:
+            return [0.0] * len(completions)
 
-    rewards = []
-    for length, is_correct in zip(lengths, correctness):
-        lambda_val = 0.5 - (length - min_len) / (max_len - min_len)
-
-        if is_correct:
-            reward = lambda_val
+        rewards = []
+        if len(all_correct) == 0:
+            rewards = [0.0] * len(completions)
         else:
-            reward = min(0, lambda_val)
-
-        rewards.append(float(reward))
-
-    return rewards
-
+            min_len_correct = min(all_correct)
+            max_len_correct = max(all_correct)
+            if max_len_correct == min_len_correct:
+                rewards = [0.0] * len(completions)
+            else:
+                for i, (length, correct) in enumerate(zip(lengths, correctness)):
+                    if correct:
+                        rewards.append(1.0 - 0.5*(length - min_len_correct) / (max_len_correct - min_len_correct))
+                    else:
+                        rewards.append(0)
+        return rewards
+    return len_reward
 
 def get_cosine_scaled_reward(
     min_value_wrong: float = -1.0,

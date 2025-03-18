@@ -31,8 +31,8 @@ from open_r1.rewards import (
     format_reward,
     get_code_format_reward,
     get_cosine_scaled_reward,
+    get_len_reward,
     get_repetition_penalty_reward,
-    len_reward,
     reasoning_steps_reward,
     tag_count_reward,
 )
@@ -172,7 +172,7 @@ def main(script_args, training_args, model_args):
             ngram_size=script_args.repetition_n_grams,
             max_penalty=script_args.repetition_max_penalty,
         ),
-        "length": len_reward,
+        "length": get_len_reward(tokenizer=tokenizer, max_ctx=training_args.max_ctx),
         "code": code_reward,
         "code_format": get_code_format_reward(language=script_args.code_language),
         "tag_count": tag_count_reward,
