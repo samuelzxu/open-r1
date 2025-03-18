@@ -103,7 +103,7 @@ def reasoning_steps_reward(completions, **kwargs):
     return [min(1.0, count / 3) for count in matches]
 
 
-def get_len_reward(tokenizer: AutoTokenizer = None, **kwargs) -> float:
+def get_len_reward(tokenizer: AutoTokenizer = None, max_ctx: int =8196, **kwargs) -> float:
     """Compute length-based rewards to discourage overthinking and promote token efficiency.
 
     Taken from from the Kimi 1.5 tech report: https://arxiv.org/abs/2501.12599
@@ -144,6 +144,7 @@ def get_len_reward(tokenizer: AutoTokenizer = None, **kwargs) -> float:
 
         # Calculate lengths
         lengths = [len(tokenizer.tokenize(content)) for content in contents]
+        print("Lengths from RF: ",lengths)
         min_len = min(lengths)
         max_len = max(lengths)
         all_correct = [lengths[i] for i, correct in enumerate(correctness) if correct]

@@ -781,7 +781,17 @@ class GRPOTrainer(Trainer):
         else:
             completions = completions_text
 
+        
+        prompts_gathered = gather_object(prompts)
+        completions_gathered = gather_object(completions)
+
         rewards_per_func = torch.zeros(len(prompts), len(self.reward_funcs), device=device)
+        rewards_per_func = gather(rewards_per_func)
+
+        print(f"Completions gathered len: {[len(completion_gathered) for completion_gathered in completions_gathered]}")
+        with open("test.txt", 'w') as f:
+            f.write(str(completions_gathered))
+
         for i, (reward_func, reward_processing_class) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes)
         ):
@@ -801,12 +811,18 @@ class GRPOTrainer(Trainer):
                 # Repeat all input columns (but "prompt" and "completion") to match the number of generations
                 keys = [key for key in inputs[0] if key not in ["prompt", "completion"]]
                 reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
-                output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs)
+                # print(f"Calculating rewards for {len(completions_gathered)} completions,{len(prompts_gathered)} prompts")
+                # print(f"rewards per func shape while being calculated: {rewards_per_func.shape}")
+                # print(reward_kwargs)
+                if ('solution') in reward_kwargs:
+                    output_reward_func = reward_func(prompts=prompts_gathered, completions=completions_gathered, solution=[reward_kwargs['solution'][0]]*len(completions_gathered))
+                # print(f"Output reward func length: ",len(output_reward_func))
+                # print(output_reward_func)
                 rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
-
         # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
         # completions may be distributed across processes
-        rewards_per_func = gather(rewards_per_func)
+        
+        print(f"Gathered rewards across all funcs: {rewards_per_func}")
 
         # Apply weights to each reward function's output and sum
         rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).sum(dim=1)
