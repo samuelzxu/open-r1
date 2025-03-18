@@ -113,7 +113,7 @@ def reasoning_steps_reward(completions, **kwargs):
     return [min(1.0, count / 3) for count in matches]
 
 
-def get_len_reward(completions: list[Dict[str, str]], solution: list[str], max_ctx: int = 4096, tokenizer: AutoTokenizer = None, **kwargs) -> float:
+def get_len_reward(tokenizer: AutoTokenizer = None, **kwargs) -> float:
     """Compute length-based rewards to discourage overthinking and promote token efficiency.
 
     Taken from from the Kimi 1.5 tech report: https://arxiv.org/abs/2501.12599
@@ -133,7 +133,7 @@ def get_len_reward(completions: list[Dict[str, str]], solution: list[str], max_c
     if tokenizer is None:
         tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-14B")
 
-    def len_reward(completions, solution, **kwargs):
+    def len_reward(completions: list[Dict[str, str]], solution: list[str], **kwargs):
         contents = [completion[0]["content"] for completion in completions]
         # First check correctness of answers
         correctness = []

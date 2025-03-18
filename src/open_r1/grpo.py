@@ -172,7 +172,7 @@ def main(script_args, training_args, model_args):
             ngram_size=script_args.repetition_n_grams,
             max_penalty=script_args.repetition_max_penalty,
         ),
-        "length": get_len_reward(tokenizer=tokenizer, max_ctx=training_args.max_ctx),
+        "length": get_len_reward(tokenizer=tokenizer),
         "code": code_reward,
         "code_format": get_code_format_reward(language=script_args.code_language),
         "tag_count": tag_count_reward,
