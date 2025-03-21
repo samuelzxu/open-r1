@@ -15,6 +15,7 @@
 import os
 import textwrap
 import warnings
+import tempfile
 from collections import defaultdict
 from typing import Any, Callable, Optional, Sized, Union
 from unittest.mock import patch
@@ -377,6 +378,14 @@ class GRPOTrainer(Trainer):
         self.max_completion_length = args.max_completion_length  # = |o_i| in the GRPO paper
         self.num_generations = args.num_generations  # = G in the GRPO paper
         self.use_vllm = args.use_vllm
+        
+        # Directory to save temporary model state for vLLM mode switching
+        self.vllm_temp_dir = os.path.join(args.output_dir, "vllm_temp")
+        os.makedirs(self.vllm_temp_dir, exist_ok=True)
+        
+        # Flag to track vLLM initialization status
+        self.vllm_initialized = False
+        self.llm = None
 
         # Multi-step
         self.num_iterations = args.num_iterations  # = 𝜇 in the GRPO paper
@@ -442,64 +451,21 @@ class GRPOTrainer(Trainer):
                     "`pip install vllm` to use it."
                 )
 
-            if self.accelerator.is_main_process:
-                vllm_device = self.args.vllm_device
-                if vllm_device == "auto":
-                    if torch.cuda.device_count() == 1:
-                        vllm_device = "cuda:0"  # particular case when training with onyl 1 GPU: share it
-                    else:
-                        vllm_device = f"cuda:{self.accelerator.num_processes}"  # take the next GPU idx
-                # Check that the requested device is available
-                if vllm_device.split(":")[0] == "cuda" and int(vllm_device.split(":")[1]) >= torch.cuda.device_count():
-                    raise ValueError(
-                        f"The requested device for vllm ({vllm_device}) is not available. You are likely using vLLM "
-                        "without restricting the number of GPUs for training. Set the `--num_processes` argument to a "
-                        "value lower than the number of GPUs available on your machine—typically, reducing it by one "
-                        f"is sufficient. In your case: `--num_processes {torch.cuda.device_count() - 1}`."
-                    )
-                # Check that the requested device is not also used for training
-                if vllm_device in {f"cuda:{idx}" for idx in range(self.accelerator.num_processes)}:
-                    warnings.warn(
-                        f"The requested device {vllm_device} is also being used for training. For higher throughput "
-                        "and to avoid out-of-memory errors, it is recommended to use a dedicated device for vLLM. "
-                        "If this is intentional, you may ignore this warning but should adjust "
-                        "`vllm_gpu_memory_utilization` accordingly."
-                    )
-                # vLLM is not compatible with accelerate. So we need to patch it to make sure we can (1) place the vLLM
-                # model on the desired device (world_size_patch) and (2) avoid a test that is not designed for our
-                # setting (profiling_patch).
-                world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
-                profiling_patch = patch(
-                    "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling", return_value=None
-                )
-                with world_size_patch, profiling_patch:
-                    self.llm = LLM(
-                        model=model.name_or_path,
-                        device=vllm_device,
-                        gpu_memory_utilization=self.args.vllm_gpu_memory_utilization,
-                        dtype=self.args.vllm_dtype,
-                        # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
-                        # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
-                        # This is particularly useful here because we generate completions from the same prompts.
-                        enable_prefix_caching=self.args.vllm_enable_prefix_caching,
-                        max_model_len=self.args.vllm_max_model_len,
-                    )
-
-                # Guided decoding, if enabled
-                if args.vllm_guided_decoding_regex is not None:
-                    guided_decoding = GuidedDecodingParams(backend="outlines", regex=args.vllm_guided_decoding_regex)
-                else:
-                    guided_decoding = None
-
-                # Sampling parameters
-                self.sampling_params = SamplingParams(
-                    temperature=args.temperature,
-                    max_tokens=self.max_completion_length,
-                    guided_decoding=guided_decoding,
-                    n=args.num_generations,
-                )
-
+            # We don't initialize vLLM here anymore - we'll do it when needed
+            # This allows all GPUs to be used for training initially
             self._last_loaded_step = 0  # tag to avoid useless loading during grad accumulation
+            self.sampling_params = SamplingParams(
+                temperature=args.temperature,
+                max_tokens=self.max_completion_length,
+                guided_decoding=None,  # Will be set during initialization if needed
+                n=args.num_generations,
+            )
+            
+            # Set up guided decoding if enabled
+            if args.vllm_guided_decoding_regex is not None:
+                self.guided_decoding = GuidedDecodingParams(backend="outlines", regex=args.vllm_guided_decoding_regex)
+            else:
+                self.guided_decoding = None
 
             # When using vLLM, the main process is responsible for loading the model weights. This can cause process
             # desynchronization and seems to lead to DeepSpeed hanging during initialization. To prevent this, we
@@ -627,36 +593,190 @@ class GRPOTrainer(Trainer):
         return selective_log_softmax(logits, input_ids)  #  compute logprobs for the input tokens
 
     @profiling_decorator
-    def _move_model_to_vllm(self):
-        with unwrap_model_for_generation(
-            self.model, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
-        ) as unwrapped_model:
-            if is_compiled_module(unwrapped_model):
-                unwrapped_model = unwrapped_model._orig_mod
-            if is_peft_model(unwrapped_model):
-                unwrapped_model.merge_adapter()
-                state_dict = unwrapped_model.state_dict()
-                # Remove base_model and base_layer prefixes
-                state_dict = {
-                    k.removeprefix("base_model.model.").replace(".base_layer", ""): v for k, v in state_dict.items()
-                }
-                # Remove values with adapter prefix (example: "_lora")
-                state_dict = {k: v for k, v in state_dict.items() if unwrapped_model.prefix not in k}
-                # When module to save, remove its prefix and discard the original module
-                state_dict = {
-                    k.replace("modules_to_save.default.", ""): v
-                    for k, v in state_dict.items()
-                    if "original_module" not in k
-                }
-            else:
-                state_dict = unwrapped_model.state_dict()
+    def _initialize_vllm(self):
+        """Initialize vLLM on all available GPUs when needed."""
+        if self.vllm_initialized:
+            return
+            
+        self.accelerator.wait_for_everyone()
+        
+        # For vLLM to work properly with distributed training, we need careful patching
+        world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
+        profiling_patch = patch(
+            "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling", return_value=None
+        )
+        
+        with world_size_patch, profiling_patch:
+            # Instead of using all GPUs directly for tensor parallelism, 
+            # we'll only use a single GPU for vLLM to avoid distributed conflicts
+            tensor_parallel_size = 1  # Using single GPU mode for vLLM
+            
+            # Calculate appropriate memory utilization
+            gpu_memory_utilization = self.args.vllm_gpu_memory_utilization
+            
+            # Only initialize on the main process
             if self.accelerator.is_main_process:
-                llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-                llm_model.load_weights(state_dict.items())
-            # Unmerge the adapter to restore the model to its original state.
-            # This must be done after loading weights to ensure they correspond to the merged state.
-            if is_peft_model(unwrapped_model):
-                unwrapped_model.unmerge_adapter()
+                try:
+                    self.llm = LLM(
+                        model=self.model.name_or_path,
+                        tensor_parallel_size=tensor_parallel_size,
+                        gpu_memory_utilization=gpu_memory_utilization,
+                        dtype=self.args.vllm_dtype,
+                        enable_prefix_caching=self.args.vllm_enable_prefix_caching,
+                        max_model_len=self.args.vllm_max_model_len or 4096,
+                    )
+                    
+                    if self.guided_decoding is not None:
+                        self.sampling_params.guided_decoding = self.guided_decoding
+                except Exception as e:
+                    # Provide more helpful error information
+                    print(f"vLLM initialization failed: {str(e)}")
+                    print(f"GPU count: {torch.cuda.device_count()}")
+                    print(f"Current device: {torch.cuda.current_device()}")
+                    raise
+                
+        self.vllm_initialized = True
+        self.accelerator.wait_for_everyone()
+
+    @profiling_decorator
+    def _save_training_state(self):
+        """Save current training state to disk so we can restore it after vLLM generation."""
+        self.accelerator.wait_for_everyone()
+        
+        # Only the main process needs to save the model
+        if self.accelerator.is_main_process:
+            # Get the unwrapped model
+            with unwrap_model_for_generation(
+                self.model, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
+            ) as unwrapped_model:
+                if is_compiled_module(unwrapped_model):
+                    unwrapped_model = unwrapped_model._orig_mod
+                # Save the model to a temporary directory
+                unwrapped_model.save_pretrained(self.vllm_temp_dir)
+                
+                # Save optimizer and scheduler states if available
+                if self.optimizer is not None:
+                    torch.save(self.optimizer.state_dict(), os.path.join(self.vllm_temp_dir, "optimizer.pt"))
+                if self.lr_scheduler is not None:
+                    torch.save(self.lr_scheduler.state_dict(), os.path.join(self.vllm_temp_dir, "scheduler.pt"))
+        
+        # Wait for the main process to finish saving
+        self.accelerator.wait_for_everyone()
+
+    @profiling_decorator
+    def _restore_training_state(self):
+        """Restore training state after vLLM generation."""
+        self.accelerator.wait_for_everyone()
+        
+        # Each process loads the model from the temporary directory
+        # This is done through the accelerator to handle distributed training properly
+        if self.is_deepspeed_enabled:
+            # For DeepSpeed, we need special handling
+            # This assumes DeepSpeed checkpoint format is compatible
+            model_id = self.vllm_temp_dir
+            model_init_kwargs = self.args.model_init_kwargs or {}
+            
+            # Load the base model
+            temp_model = AutoModelForCausalLM.from_pretrained(model_id, **model_init_kwargs)
+            
+            # Get the state dictionary
+            state_dict = temp_model.state_dict()
+            
+            # Apply to the current model
+            # For DeepSpeed, we need to load through the engine
+            # The deepspeed engine handles parameter partitioning
+            self.deepspeed_engine.load_checkpoint(self.vllm_temp_dir, load_optimizer_states=False, load_lr_scheduler_states=False)
+            
+            del temp_model
+        else:
+            # Standard model loading for non-DeepSpeed cases
+            model_id = self.vllm_temp_dir
+            
+            # We'll copy state dict directly to maintain all accelerator wrappings
+            with unwrap_model_for_generation(
+                self.model, self.accelerator, gather_deepspeed3_params=False
+            ) as unwrapped_model:
+                # Load the saved model state
+                if is_compiled_module(unwrapped_model):
+                    unwrapped_model = unwrapped_model._orig_mod
+                    
+                # For PEFT models, special handling is needed
+                if is_peft_model(unwrapped_model):
+                    # Load the base model first
+                    base_model = AutoModelForCausalLM.from_pretrained(model_id)
+                    # Then apply the adapter config but load the weights from the saved state
+                    unwrapped_model.load_state_dict(base_model.state_dict(), strict=False)
+                    del base_model
+                else:
+                    # Standard loading for normal models
+                    saved_model = AutoModelForCausalLM.from_pretrained(model_id)
+                    unwrapped_model.load_state_dict(saved_model.state_dict())
+                    del saved_model
+        
+        # Restore optimizer and scheduler if needed
+        if self.accelerator.is_main_process:
+            if self.optimizer is not None and os.path.exists(os.path.join(self.vllm_temp_dir, "optimizer.pt")):
+                self.optimizer.load_state_dict(torch.load(os.path.join(self.vllm_temp_dir, "optimizer.pt")))
+            if self.lr_scheduler is not None and os.path.exists(os.path.join(self.vllm_temp_dir, "scheduler.pt")):
+                self.lr_scheduler.load_state_dict(torch.load(os.path.join(self.vllm_temp_dir, "scheduler.pt")))
+        
+        # Make sure all processes are synced
+        self.accelerator.wait_for_everyone()
+
+    @profiling_decorator
+    def _move_model_to_vllm(self):
+        """Load the current model weights into vLLM."""
+        # Initialize vLLM if not already done
+        if not self.vllm_initialized:
+            self._initialize_vllm()
+        
+        # Get the unwrapped model
+        try:
+            with unwrap_model_for_generation(
+                self.model, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
+            ) as unwrapped_model:
+                if is_compiled_module(unwrapped_model):
+                    unwrapped_model = unwrapped_model._orig_mod
+                
+                if is_peft_model(unwrapped_model):
+                    unwrapped_model.merge_adapter()
+                    state_dict = unwrapped_model.state_dict()
+                    # Remove base_model and base_layer prefixes
+                    state_dict = {
+                        k.removeprefix("base_model.model.").replace(".base_layer", ""): v for k, v in state_dict.items()
+                    }
+                    # Remove values with adapter prefix (example: "_lora")
+                    state_dict = {k: v for k, v in state_dict.items() if unwrapped_model.prefix not in k}
+                    # When module to save, remove its prefix and discard the original module
+                    state_dict = {
+                        k.replace("modules_to_save.default.", ""): v
+                        for k, v in state_dict.items()
+                        if "original_module" not in k
+                    }
+                else:
+                    state_dict = unwrapped_model.state_dict()
+                    
+                # Only load weights on the main process
+                if self.accelerator.is_main_process:
+                    print("Loading weights into vLLM model...")
+                    try:
+                        llm_model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
+                        llm_model.load_weights(state_dict.items())
+                        print("Weights loaded successfully")
+                    except Exception as e:
+                        print(f"Error loading weights into vLLM: {str(e)}")
+                        print("Attempting to continue with original vLLM weights")
+                
+                # Unmerge the adapter to restore the model to its original state.
+                # This must be done after loading weights to ensure they correspond to the merged state.
+                if is_peft_model(unwrapped_model):
+                    unwrapped_model.unmerge_adapter()
+        except Exception as e:
+            print(f"Error in _move_model_to_vllm: {str(e)}")
+            print("Will attempt to continue with existing vLLM configuration")
+        
+        # Make sure all processes are synced
+        self.accelerator.wait_for_everyone()
 
     @profiling_decorator
     def _prepare_inputs(self, inputs: dict[str, Union[torch.Tensor, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
@@ -691,30 +811,96 @@ class GRPOTrainer(Trainer):
 
         # Generate completions using either vLLM or regular generation
         if self.args.use_vllm:
-            # First, have main process load weights if needed
-            if self.state.global_step != self._last_loaded_step:
-                self._move_model_to_vllm()
-                self._last_loaded_step = self.state.global_step
-
-            # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
+            # First save the current training state
+            self._save_training_state()
+            
+            # Initialize/update vLLM with current model weights
+            if not self.vllm_initialized:
+                self._initialize_vllm()
+            
+            self._move_model_to_vllm()
+            
+            # Gather all prompts from all processes to the main process
             all_prompts_text = gather_object(prompts_text)
+            
+            completion_ids = None
+            
             if self.accelerator.is_main_process:
-                # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts, and generate
-                # num_generations outputs for each one. This is faster than generating outputs for each duplicate
-                # prompt individually.
+                # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts
                 ordered_set_of_prompts = list(dict.fromkeys(all_prompts_text))
-                all_outputs = self.llm.generate(
-                    ordered_set_of_prompts, sampling_params=self.sampling_params, use_tqdm=False
-                )
+                
+                # Using a single GPU for vLLM, so we need to be careful with batch size
+                # Use a smaller batch size to avoid OOM
+                batch_size = 8  # Adjust based on your GPU memory
+                all_outputs = []
+                
+                print(f"Generating completions for {len(ordered_set_of_prompts)} unique prompts using vLLM")
+                
+                for i in range(0, len(ordered_set_of_prompts), batch_size):
+                    batch_prompts = ordered_set_of_prompts[i:i+batch_size]
+                    try:
+                        batch_outputs = self.llm.generate(
+                            batch_prompts, sampling_params=self.sampling_params, use_tqdm=True
+                        )
+                        all_outputs.extend(batch_outputs)
+                    except Exception as e:
+                        print(f"Error generating batch {i//batch_size + 1}: {str(e)}")
+                        print(f"Falling back to smaller batch size for this batch")
+                        # Try with smaller batches if there's an error
+                        for single_prompt in batch_prompts:
+                            try:
+                                single_output = self.llm.generate(
+                                    [single_prompt], sampling_params=self.sampling_params, use_tqdm=False
+                                )
+                                all_outputs.extend(single_output)
+                            except Exception as e2:
+                                print(f"Error generating prompt: {str(e2)}")
+                                # Create a dummy output if generation fails
+                                class DummyOutput:
+                                    def __init__(self):
+                                        self.token_ids = [0]  # Just the padding token
+                                        self.text = ""
+                                
+                                class DummyOutputs:
+                                    def __init__(self, num_outputs):
+                                        # Create specified number of dummy outputs
+                                        self.outputs = [DummyOutput() for _ in range(num_outputs)]
+                                
+                                all_outputs.append(DummyOutputs(self.sampling_params.n))
+                
+                # Create mapping from prompt to completions
+                prompt_to_completions = {}
+                for idx, prompt in enumerate(ordered_set_of_prompts):
+                    if idx < len(all_outputs):  # Safety check
+                        prompt_to_completions[prompt] = []
+                        for output in all_outputs[idx].outputs:
+                            prompt_to_completions[prompt].append(output.token_ids)
+                    else:
+                        # Handle case where output might be missing
+                        prompt_to_completions[prompt] = [[0]]  # Default to padding token
+                
+                # Now map all_prompts_text to their completions
                 completion_ids = []
-                for outputs in all_outputs:
-                    for output in outputs.outputs:
-                        completion_ids.append(output.token_ids)
-            else:
-                completion_ids = [None] * len(all_prompts_text)
-            # Broadcast the completions from the main process to all processes, ensuring each process receives its
-            # corresponding slice.
-            completion_ids = broadcast_object_list(completion_ids, from_process=0)
+                for prompt in all_prompts_text:
+                    # Get the next completion for this prompt
+                    completions = prompt_to_completions.get(prompt, [[0]])
+                    # If we've used all completions, cycle back to the first one
+                    completion_idx = all_prompts_text.count(prompt) % len(completions)
+                    completion_ids.append(completions[min(completion_idx, len(completions)-1)])
+                    
+                # Log some generations for debugging
+                if self.log_completions and len(ordered_set_of_prompts) > 0:
+                    print(f"Sample generation - Prompt: {ordered_set_of_prompts[0]}")
+                    print(f"Completion: {all_outputs[0].outputs[0].text if len(all_outputs) > 0 else 'No output'}")
+                    print(f"Generated {len(completion_ids)} completions for {len(all_prompts_text)} prompts")
+            
+            # Broadcast the completions from the main process to all processes
+            completion_ids = broadcast_object_list([completion_ids], from_process=0)[0]
+            
+            # Restore the training state before continuing
+            self._restore_training_state()
+            
+            # Get the slice for this process
             process_slice = slice(
                 self.accelerator.process_index * len(prompts),
                 (self.accelerator.process_index + 1) * len(prompts),
@@ -818,8 +1004,7 @@ class GRPOTrainer(Trainer):
         # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
         # completions may be distributed across processes
         
-        if self.accelerator.is_local_main_process:
-            print(f"Gathered rewards across all funcs:\n {rewards_per_func}")
+        print(f"Gathered rewards across all funcs:\n {rewards_per_func}")
 
         # Apply weights to each reward function's output and sum
         rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).sum(dim=1)

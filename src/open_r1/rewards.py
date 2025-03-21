@@ -144,7 +144,7 @@ def get_len_reward(tokenizer: AutoTokenizer = None, max_ctx: int =8196, **kwargs
 
         # Calculate lengths
         lengths = [len(tokenizer.tokenize(content)) for content in contents]
-        print("Lengths from RF: ",lengths)
+        # print("Lengths from RF: ",lengths)
         min_len = min(lengths)
         max_len = max(lengths)
         all_correct = [lengths[i] for i, correct in enumerate(correctness) if correct]
@@ -170,7 +170,7 @@ def get_len_reward(tokenizer: AutoTokenizer = None, max_ctx: int =8196, **kwargs
                         rewards.append(1.0 - 0.5*(length - min_len) / (max_len - min_len))
                     else:
                         rewards.append(0)
-                print("Rewards: ",rewards)
+                # print("Rewards: ",rewards)
         return rewards
     return len_reward
 
