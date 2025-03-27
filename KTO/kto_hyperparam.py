@@ -24,7 +24,7 @@ if __name__ == "__main__":
     model.resize_token_embeddings(len(tokenizer))
 
     training_args = KTOConfig(
-        output_dir="DeepSeek-R1-Distill-Qwen-7B-KTO",
+        # output_dir="DeepSeek-R1-Distill-Qwen-7B-KTO",
         logging_steps=5,
         gradient_accumulation_steps=6,
         bf16=True,
@@ -41,8 +41,10 @@ if __name__ == "__main__":
         eval_strategy='steps',
         eval_steps=50,
         max_steps=250,
-        # save_strategy='steps',
-        # save_steps=400,
+        save_strategy='steps',
+        save_steps=250,
+        output_dir=f"DeepSeek-R1-Distill-Qwen-7B-KTO-lr_{args.lr}_beta_{args.beta}",
+
         # save_total_limit=1,
         # hub_strategy='every_save',
         # num_train_epochs=2,
