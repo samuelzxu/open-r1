@@ -1,0 +1,1 @@
+accelerate launch --config_file testing/zero2.yaml testing/kto.py
