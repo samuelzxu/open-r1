@@ -17,7 +17,7 @@ model.resize_token_embeddings(len(tokenizer))
 training_args = KTOConfig(
     output_dir="DeepSeek-R1-Distill-Qwen-7B-KTO",
     logging_steps=10,
-    gradient_accumulation_steps=8,
+    gradient_accumulation_steps=6,
     bf16=True,
     max_length=8196,
     max_prompt_length=512,

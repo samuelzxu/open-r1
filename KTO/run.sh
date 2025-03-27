@@ -1,0 +1,1 @@
+accelerate launch --config_file KTO/zero2.yaml KTO/kto.py

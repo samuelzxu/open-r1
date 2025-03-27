@@ -25,17 +25,19 @@ if __name__ == "__main__":
 
     training_args = KTOConfig(
         output_dir="DeepSeek-R1-Distill-Qwen-7B-KTO",
-        logging_steps=10,
-        gradient_accumulation_steps=8,
+        logging_steps=5,
+        gradient_accumulation_steps=6,
         bf16=True,
         max_length=8196,
         max_prompt_length=512,
         max_completion_length=8196,
         dataset_num_proc=150,
         per_device_train_batch_size=2,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
         per_device_eval_batch_size=2,
+
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         gradient_checkpointing=True,
+
         eval_strategy='steps',
         eval_steps=50,
         max_steps=250,
