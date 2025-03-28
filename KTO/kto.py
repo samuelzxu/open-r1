@@ -7,7 +7,7 @@ import torch
 
 if __name__ == "__main__":
     lr = 5e-6
-    beta = 0.01
+    beta = 0.1
 
     model = AutoModelForCausalLM.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", attn_implementation="flash_attention_2", torch_dtype=torch.bfloat16, use_cache=False)
     tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", padding_side='left')
@@ -21,8 +21,8 @@ if __name__ == "__main__":
 
     training_args = KTOConfig(
         push_to_hub=True,
-        hub_model_id='samitizerxu/DS-7B-Qwen-distil-KTO-keep',
-        output_dir="DeepSeek-R1-Distill-Qwen-7B-KTO-keep",
+        hub_model_id='samitizerxu/DS-7B-Qwen-distil-KTO-keep-alt',
+        output_dir="DeepSeek-R1-Distill-Qwen-7B-KTO-keep-alt",
 
         logging_steps=5,
         gradient_accumulation_steps=6,
@@ -45,7 +45,7 @@ if __name__ == "__main__":
         save_total_limit=3,
         hub_strategy='end',
         num_train_epochs=2,
-        run_name=f"FINAL-lr_5e-6_beta_0.01",
+        run_name=f"FINAL-lr_5e-6_beta_0.1",
         
         learning_rate=lr,
         beta=beta,
